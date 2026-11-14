@@ -1,0 +1,18 @@
+---
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  main:
+    lifecycle:
+      run: echo RUN
+      shutdown:
+        posix:
+          script: sleep 120
+          timeout: 1
+        windows:
+          script: ping -n 120 127.0.0.1 > NUL
+          timeout: 1

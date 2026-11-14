@@ -1,0 +1,406 @@
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package com.aws.greengrass.componentmanager.plugins.docker;
+
+import com.aws.greengrass.componentmanager.ComponentStore;
+import com.aws.greengrass.componentmanager.builtins.ArtifactDownloader;
+import com.aws.greengrass.componentmanager.exceptions.InvalidArtifactUriException;
+import com.aws.greengrass.componentmanager.exceptions.PackageDownloadException;
+import com.aws.greengrass.componentmanager.exceptions.PackageLoadingException;
+import com.aws.greengrass.componentmanager.models.ComponentArtifact;
+import com.aws.greengrass.componentmanager.models.ComponentIdentifier;
+import com.aws.greengrass.componentmanager.models.ComponentRecipe;
+import com.aws.greengrass.componentmanager.plugins.docker.exceptions.ConnectionException;
+import com.aws.greengrass.componentmanager.plugins.docker.exceptions.DockerImageDeleteException;
+import com.aws.greengrass.componentmanager.plugins.docker.exceptions.DockerLoginException;
+import com.aws.greengrass.componentmanager.plugins.docker.exceptions.DockerServiceUnavailableException;
+import com.aws.greengrass.componentmanager.plugins.docker.exceptions.UnknownDockerPullException;
+import com.aws.greengrass.dependency.Context;
+import com.aws.greengrass.mqttclient.MqttClient;
+import com.aws.greengrass.util.CrashableSupplier;
+import com.aws.greengrass.util.RetryUtils;
+import com.aws.greengrass.util.Utils;
+import com.vdurmont.semver4j.Semver;
+import com.vdurmont.semver4j.SemverException;
+import lombok.AccessLevel;
+import lombok.Setter;
+import software.amazon.awssdk.core.exception.SdkClientException;
+import software.amazon.awssdk.services.ecr.model.ServerException;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import static com.aws.greengrass.componentmanager.plugins.docker.DockerImageArtifactParser.DOCKER_TAG_LATEST;
+
+@SuppressWarnings({"PMD.SignatureDeclareThrowsException", "PMD.AvoidCatchingGenericException",
+        "PMD.AvoidInstanceofChecksInCatchClause", "PMD.AvoidRethrowingException"})
+public class DockerImageDownloader extends ArtifactDownloader {
+    static final String DOCKER_NOT_INSTALLED_ERROR_MESSAGE = "Docker engine is not installed. Install Docker and "
+            + "retry the deployment.";
+
+    private final EcrAccessor ecrAccessor;
+    private final DefaultDockerClient dockerClient;
+    private final MqttClient mqttClient;
+
+    @Setter(AccessLevel.PACKAGE)
+    private RetryUtils.RetryConfig infiniteAttemptsRetryConfig =
+            RetryUtils.RetryConfig.builder().initialRetryInterval(Duration.ofMinutes(1L))
+                    .maxRetryInterval(Duration.ofMinutes(5L)).maxAttempt(Integer.MAX_VALUE).retryableExceptions(
+                        Arrays.asList(ConnectionException.class, SdkClientException.class, ServerException.class))
+                    .build();
+    @Setter(AccessLevel.PACKAGE)
+    private RetryUtils.RetryConfig finiteAttemptsRetryConfig =
+            RetryUtils.RetryConfig.builder().initialRetryInterval(Duration.ofSeconds(10L))
+                    .maxRetryInterval(Duration.ofMinutes(32L)).maxAttempt(30).retryableExceptions(
+                            Arrays.asList(DockerServiceUnavailableException.class, DockerLoginException.class,
+                            SdkClientException.class, ServerException.class)).build();
+
+    // A docker pull error that is recognized as neither a network error nor a non-retryable error may still be
+    // transient, so allow a small number of retries. Deliberately much shorter than finiteAttemptsRetryConfig: the
+    // error is not known to be recoverable, so this only needs to be long enough to ride out a brief blip before
+    // reporting the failure.
+    //
+    // The attempt count is chosen against the offline fallback in runWithConnectionErrorCheck, which reads
+    // MqttClient's cached connection flag. That flag can lag a real outage by around 90 seconds with default
+    // keep-alive settings, so a shorter budget could expire before the device notices it is offline, defeating the
+    // fallback for the very outages it exists to catch. Seven attempts at this ceiling span roughly 195-390 seconds
+    // with jitter, which clears that lag on any draw.
+    //
+    // This bounds the retry tier, not the deployment: performDownloadSteps re-enters run() if the ECR credentials
+    // expire mid-pull, which starts a fresh budget. In practice that can happen at most once, since the refreshed
+    // token is valid for hours, so the effective worst case is about twice the figure above.
+    @Setter(AccessLevel.PACKAGE)
+    private RetryUtils.RetryConfig unknownErrorRetryConfig =
+            RetryUtils.RetryConfig.builder().initialRetryInterval(Duration.ofSeconds(10L))
+                    .maxRetryInterval(Duration.ofMinutes(2L)).maxAttempt(7).retryableExceptions(
+                            Collections.singletonList(UnknownDockerPullException.class)).build();
+
+    @Setter(AccessLevel.PACKAGE)
+    private RetryUtils.RetryConfig finiteDeleteAttemptsRetryConfig =
+            RetryUtils.RetryConfig.builder().initialRetryInterval(Duration.ofSeconds(10L))
+                    .maxRetryInterval(Duration.ofMinutes(2L)).maxAttempt(5).retryableExceptions(
+                            Arrays.asList(DockerServiceUnavailableException.class, DockerLoginException.class,
+                                DockerImageDeleteException.class)).build();
+
+    /**
+     * Constructor.
+     *
+     * @param identifier  component identifier
+     * @param artifact    artifact to download
+     * @param artifactDir artifact store path
+     * @param context     context
+     * @param componentStore componentStore
+     */
+    public DockerImageDownloader(ComponentIdentifier identifier, ComponentArtifact artifact, Path artifactDir,
+                                 Context context, ComponentStore componentStore) {
+        super(identifier, artifact, artifactDir, componentStore);
+        ecrAccessor = context.get(EcrAccessor.class);
+        dockerClient = context.get(DefaultDockerClient.class);
+        mqttClient = context.get(MqttClient.class);
+    }
+
+    DockerImageDownloader(ComponentIdentifier identifier, ComponentArtifact artifact, Path artifactDir,
+                          DefaultDockerClient dockerClient, EcrAccessor ecrAccessor, MqttClient mqttClient,
+                          ComponentStore componentStore) {
+        super(identifier, artifact, artifactDir, componentStore);
+        this.dockerClient = dockerClient;
+        this.ecrAccessor = ecrAccessor;
+        this.mqttClient = mqttClient;
+    }
+
+    @Override
+    public File download() throws PackageDownloadException, IOException, InterruptedException {
+        logger.atDebug().log("Downloading artifact");
+        checkDownloadPrerequisites();
+        Image image;
+        try {
+            image = Image.fromArtifactUri(artifact);
+        } catch (InvalidArtifactUriException e) {
+            throw new PackageDownloadException("Failed to download due to bad artifact URI", e);
+        }
+        return performDownloadSteps(image);
+    }
+
+    @Override
+    protected long download(long rangeStart, long rangeEnd, MessageDigest messageDigest)
+            throws PackageDownloadException, InterruptedException {
+        // N/A since handling partial download is managed by docker engine
+        return 0;
+    }
+
+    @Override
+    public boolean downloadRequired() throws PackageDownloadException {
+        checkDownloadPrerequisites();
+        Image image;
+        try {
+            image = Image.fromArtifactUri(artifact);
+        } catch (InvalidArtifactUriException e) {
+            throw new PackageDownloadException("Failed to check if the download required due to bad artifact URI", e);
+        }
+
+        if (DOCKER_TAG_LATEST.equals(image.getTag())) {
+            logger.atDebug().log("Image tag: [{}] found, will require download and not check for the image locally.",
+                DOCKER_TAG_LATEST);
+            return true;
+        } else {
+            return !dockerClient.imageExistsLocally(image);
+        }
+    }
+
+    @Override
+    public Optional<String> checkDownloadable() {
+        // TODO : Maybe worth checking if device is configured such that it can get TES credentials for ECR.
+        // N/A for images from other registries
+        return Optional.empty();
+    }
+
+    @Override
+    public Long getDownloadSize() throws PackageDownloadException, InterruptedException {
+        // Not supported for docker images
+        return null;
+    }
+
+    @Override
+    public String getArtifactFilename() {
+        // Not applicable for docker images since docker engine abstracts this
+        return null;
+    }
+
+    @Override
+    public boolean checkComponentStoreSize() {
+        // Not applicable for docker images since docker has its own image store
+        return false;
+    }
+
+    @Override
+    public boolean canSetFilePermissions() {
+        // Not applicable for docker images since docker has its own image store
+        return false;
+    }
+
+    @Override
+    public boolean canUnarchiveArtifact() {
+        // Not applicable for docker images since docker engine abstracts this
+        return false;
+    }
+
+    private void checkDownloadPrerequisites() throws PackageDownloadException {
+        // Check that Docker engine is installed
+        if (!dockerClient.dockerInstalled()) {
+            throw new PackageDownloadException(getErrorString(DOCKER_NOT_INSTALLED_ERROR_MESSAGE));
+        }
+    }
+
+    private File performDownloadSteps(Image image) throws PackageDownloadException, InterruptedException {
+        AtomicBoolean credentialRefreshNeeded = new AtomicBoolean(false);
+        do {
+            // Attempt getting credentials and login only for private registries, .
+            if (image.getRegistry().isPrivateRegistry()) {
+                // Get credentials for the registry
+                try {
+                    RetryUtils.runWithRetry(infiniteAttemptsRetryConfig, () -> {
+                        // Currently we only support private registries in ECR so assume others are public,
+                        // when we add support for private non-ECR registries, this can be expanded to retrieve
+                        // credentials for them on case by case basis
+                        if (image.getRegistry().isEcrRegistry()) {
+                            // Get auth token for ECR, which represents ECR registry credentials
+
+                            String imageHostedRegion = getRegionFromArtifactUri(image.getArtifactUri().toString());
+
+                            Registry.Credentials credentials =
+                                    ecrAccessor.getCredentials(image.getRegistry().getRegistryId(), imageHostedRegion);
+                            image.getRegistry().setCredentials(credentials);
+                            credentialRefreshNeeded.set(false);
+                        }
+                        return null;
+                    }, "get-ecr-auth-token", logger);
+                } catch (InterruptedException e) {
+                    throw e;
+                } catch (Exception e) {
+                    throw new PackageDownloadException(getErrorString("Failed to get auth token for docker login"), e);
+                }
+
+                // Login to registry
+                // TODO: [P44950158]: Avoid logging into registries which might already have been logged in previously
+                //  with the same and valid credentials by maintaining a cache across artifacts and deployments
+                run(() -> {
+                    if (credentialsUsable(image)) {
+                        dockerClient.login(image.getRegistry());
+                    } else {
+                        // Credentials have expired, re-fetch and login again
+                        logger.atInfo().kv("registry-endpoint", image.getRegistry().getEndpoint())
+                                .log("Registry credentials have expired,"
+                                        + "fetching fresh credentials and logging in again");
+                        credentialRefreshNeeded.set(true);
+                    }
+                    return null;
+                }, "docker-login", "Failed to login to docker registry");
+            }
+
+            // Don't even attempt to pull images if credentials are expired, first try to refresh credentials
+            if (credentialRefreshNeeded.get()) {
+                continue;
+            }
+
+            // Docker pull
+            run(() -> {
+                if (credentialsUsable(image)) {
+                    RetryUtils.runWithRetry(infiniteAttemptsRetryConfig, () -> {
+                        dockerClient.pullImage(image);
+                        return null;
+                    }, "get-ecr-image", logger);
+                } else {
+                    // Credentials have expired, re-fetch and login again
+                    logger.atInfo().kv("registry-endpoint", image.getRegistry().getEndpoint())
+                            .log("Registry credentials have expired, fetching fresh credentials and logging in again");
+                    credentialRefreshNeeded.set(true);
+                }
+                return null;
+            }, "docker-pull-image", "Failed to download docker image");
+        } while (credentialRefreshNeeded.get());
+        // No file resources available since image artifacts are stored in docker's image store
+        return null;
+    }
+
+    private String getRegionFromArtifactUri(String artifactUriStr) {
+        //get the actual region from the artifact uri
+
+        String regionStr = "";
+
+        if (!Utils.isEmpty(artifactUriStr)) {
+            String[] arr = artifactUriStr.split("\\.");
+
+            if (arr.length > 1) {
+                for (int i = 1; i < arr.length; i++) {
+                    if ("amazonaws".equalsIgnoreCase(arr[i])) {
+                        regionStr = arr[i - 1];
+                        break;
+                    }
+                }
+            }
+        }
+
+        return regionStr;
+    }
+
+    /*
+     * Check if credentials are valid for private registries, always return true for public registries.
+     */
+    private boolean credentialsUsable(Image image) {
+        return !image.getRegistry().isPrivateRegistry() || image.getRegistry().getCredentials().isValid();
+    }
+
+    private <T> void run(CrashableSupplier<T, Exception> task, String description, String message)
+            throws PackageDownloadException, InterruptedException {
+        try {
+            // Finite retry attempts for errors that are not due to connectivity issues and
+            // might need explicit intervention to recover from, and a shorter finite retry for errors that could
+            // not be classified at all
+            RetryUtils.runWithRetry(RetryUtils.DifferentiatedRetryConfig.builder()
+                            .retryConfigList(Arrays.asList(finiteAttemptsRetryConfig, unknownErrorRetryConfig)).build(),
+                    () -> RetryUtils
+                    // Indefinite retry for errors that are due to connectivity issues and can be
+                    // resolved when connectivity comes back
+                    .runWithRetry(infiniteAttemptsRetryConfig, () -> runWithConnectionErrorCheck(task), description,
+                            logger), description, logger);
+        } catch (InterruptedException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new PackageDownloadException(getErrorString(message), e);
+        }
+    }
+
+    private <T> T runWithConnectionErrorCheck(CrashableSupplier<T, Exception> task) throws Exception {
+        try {
+            return task.apply();
+        } catch (Exception e) {
+            // Since docker engine can throw service unavailable error that may or may not indicate a problem that
+            // can be fixed with retries, explicitly check if an error could be due to connectivity problem
+            // we infer that based on Mqtt connection, even though not perfect, it should accurately represent if
+            // device is having connectivity issues most of the times.
+            // The same inference applies to a pull error that could not be classified at all. Classification depends
+            // on docker's stderr text, which is not a stable contract and cannot cover every transport failure, so
+            // the device's own connectivity is used as independent evidence: if it is offline, an unrecognized
+            // failure is far more likely to be that outage than anything the registry reported, and should be
+            // retried until connectivity returns rather than given up on after a bounded number of attempts. When
+            // the device is online the bounded retry still applies, so an error that is genuinely permanent
+            // continues to surface promptly.
+            if ((e instanceof DockerServiceUnavailableException || e instanceof UnknownDockerPullException)
+                    && !mqttClient.getMqttOnline().get()) {
+                throw new ConnectionException("Device appears to be offline, should retry the task", e);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Cleanup component, delete docker image when component being removed.
+     * @throws IOException exception
+     */
+    @Override
+    public void cleanup() throws IOException {
+        try {
+            if (!ifImageUsedByOther(componentStore)) {
+            RetryUtils.runWithRetry(finiteDeleteAttemptsRetryConfig, () -> {
+                Image image = DockerImageArtifactParser
+                        .getImage(ComponentArtifact.builder().artifactUri(artifact.getArtifactUri()).build());
+                dockerClient.deleteImage(image);
+                return null;
+            }, "docker-image-cleanup", logger);
+            }
+        } catch (PackageLoadingException | InvalidArtifactUriException e) {
+            throw new IOException(e);
+        } catch (InterruptedException e) {
+            logger.atWarn().setCause(e).log("Docker image clean up interrupted.");
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            throw new IOException("Failed to cleanup docker image after retries", e);
+        }
+    }
+
+    /**
+     * Judge if the docker image used by other artifacts.
+     *
+     * @param componentStore componentStore
+     * @return true: this image used by other; false: not used.
+     * @throws PackageLoadingException from getPackageRecipe
+     */
+    public boolean ifImageUsedByOther(ComponentStore componentStore) throws PackageLoadingException {
+        Map<String, Set<String>> allVersions = componentStore.listAvailableComponentVersions();
+        for (Map.Entry<String, Set<String>> versions : allVersions.entrySet()) {
+            String compName = versions.getKey();
+            Set<String> localVersions = new HashSet<>(versions.getValue());
+            for (String compVersion : localVersions) {
+                try {
+                    ComponentIdentifier identifier = new ComponentIdentifier(compName, new Semver(compVersion));
+                    // this.identifier is to be deleted identifier. Skip checking ourselves.
+                    if (identifier.equals(this.identifier)) {
+                        continue;
+                    }
+                    ComponentRecipe recipe = componentStore.getPackageRecipe(identifier);
+                    if (recipe.getArtifacts().stream().anyMatch(
+                            i -> i.getArtifactUri().equals(artifact.getArtifactUri()))) {
+                        return true;
+                    }
+                } catch (SemverException e) {
+                    logger.atWarn().kv("identifier", identifier.getName()).kv("compVersion", compVersion)
+                            .setCause(e).log("Error happened when semver being created");
+                }
+            }
+        }
+        return false;
+    }
+}

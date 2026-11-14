@@ -1,0 +1,14 @@
+---
+RecipeFormatVersion: '2020-01-25'
+ComponentName: SimpleApp
+ComponentDescription: A simple test app
+ComponentPublisher: Me
+ComponentVersion: '1.0.0'
+ComponentConfiguration:
+  DefaultConfiguration:
+    sampleText: This is a test
+Manifests:
+  - Platform:
+      os: all
+    Lifecycle:
+      run:

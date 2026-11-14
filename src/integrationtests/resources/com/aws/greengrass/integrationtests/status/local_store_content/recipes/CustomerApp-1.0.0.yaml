@@ -1,0 +1,34 @@
+---
+RecipeFormatVersion: '2020-01-25'
+ComponentName: CustomerApp
+ComponentDescription: A customer app
+ComponentPublisher: Me
+ComponentVersion: '1.0.0'
+ComponentConfiguration:
+  DefaultConfiguration:
+    sampleText: This is a test
+ComponentDependencies:
+  Mosquitto:
+    VersionRequirement: 1.0.0
+
+Manifests:
+  - Platform:
+      os: windows
+    Parameters:
+      - name: sampleText
+        value: This is a test
+        type: STRING
+    Lifecycle:
+      run:
+    Artifacts:
+      - URI: s3://mock-bucket/customerApp
+  - Platform:
+      os: all
+    Parameters:
+      - name: sampleText
+        value: This is a test
+        type: STRING
+    Lifecycle:
+      run:
+    Artifacts:
+      - URI: s3://mock-bucket/customerApp

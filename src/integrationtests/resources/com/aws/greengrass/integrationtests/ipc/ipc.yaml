@@ -1,0 +1,53 @@
+---
+system:
+  certificateFilePath: "/greengrass/v2/device.pem.crt"
+  privateKeyPath: "/greengrass/v2/private.pem.key"
+  ipcSocketPath: "/ipcFolder/ipc.socket"
+  rootpath: "/greengrass/v2"
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  main:
+    dependencies:
+      - mqtt
+      - aws.greengrass.StreamManager
+      - ServiceName
+      - ServiceToBeRestarted
+      - ServiceToBeStopped
+  mqtt:
+    lifecycle:
+    version: 1.0.0
+  aws.greengrass.StreamManager:
+    lifecycle: {}
+    version: 1.0.0
+  ServiceName:
+    lifecycle:
+      run:
+        windows:
+          ping -n 100 127.0.0.1 > NUL
+        posix:
+          sleep 100
+  ServiceToBeRestarted:
+    lifecycle:
+      run:
+        windows:
+          ping -n 100 127.0.0.1 > NUL
+        posix:
+          sleep 100
+  ServiceToBeStopped:
+    lifecycle:
+      run:
+        windows:
+          ping -n 100 127.0.0.1 > NUL
+        posix:
+          sleep 100
+  StartupService:
+    lifecycle:
+      startup:
+        windows: ping -n 2 127.0.0.1 > NUL && exit /b 1
+        posix:
+          sleep 2 && exit 1

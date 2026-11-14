@@ -1,0 +1,24 @@
+services:
+  ticktock:
+    lifecycle:
+      run: echo tick-tock phase 3
+      periodic: 3 seconds
+  main:
+    lifecycle:
+      install:
+        all: echo All installed
+      run: |-
+        echo $PATH xyzzy; pwd
+        printenv
+        while true; do
+        date; sleep 5; echo Now we\'re in phase 3
+        done
+    dependencies:
+      - aws.greengrass.Nucleus
+      - ticktock
+      - frodo
+    setenv:
+      JUSTME: fancy a spot of coffee?
+  frodo:
+    lifecycle:
+      run: echo "I'm Frodo"

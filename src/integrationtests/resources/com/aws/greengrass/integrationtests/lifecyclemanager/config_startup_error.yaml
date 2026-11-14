@@ -1,0 +1,19 @@
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  startupError:
+    lifecycle:
+      posix:
+        startup: |-
+          echo "STARTUP_ERROR"
+          exit 1
+      windows:
+        startup: echo STARTUP_ERROR && exit /b 1
+
+  main:
+    dependencies:
+      - startupError

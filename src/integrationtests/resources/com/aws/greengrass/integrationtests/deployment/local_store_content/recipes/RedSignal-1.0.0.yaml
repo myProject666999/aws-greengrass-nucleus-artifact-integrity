@@ -1,0 +1,10 @@
+---
+RecipeFormatVersion: '2020-01-25'
+ComponentName: RedSignal
+ComponentDescription: A service revoking approval to proceed
+ComponentPublisher: Me
+ComponentVersion: '1.0.0'
+Manifests:
+  - Platform:
+    Lifecycle:
+      run:

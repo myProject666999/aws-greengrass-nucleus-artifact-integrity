@@ -1,0 +1,63 @@
+---
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  git:
+    lifecycle:
+      install:
+        debian:
+          skipif: onpath git
+          script: sudo apt-get install git
+        macos:
+          skipif: onpath git
+          script: brew install git
+    dependencies:
+      macos:
+        - homebrew
+  homebrew:
+    lifecycle:
+      install:
+        macos:
+          skipif: onpath brew
+          script: /usr/bin/ruby -e "$(curl --silent -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
+
+  broken:
+    lifecycle:
+      startup: exit -1
+  ticktock:
+    lifecycle:
+      run: echo tick-tock
+    periodic: 1 seconds
+  setenv:
+    ANSWER: 42
+  main:
+    lifecycle:
+      install:
+        all: echo All installed
+      posix:
+        run: |-
+          echo $PATH
+          pwd
+          printenv
+          while true; do
+          date; sleep 5; echo MAIN IS RUNNING
+          done
+      windows:
+        run: >-
+          powershell -command while(1) {echo ANSWER=$env:ANSWER;
+          echo JUSTME=$env:JUSTME; sleep 5; echo 'MAIN IS RUNNING'; }
+    dependencies:
+      macos:
+        - git
+        - ticktock:SOFT
+      all:
+        - ticktock:SOFT
+      linux:
+        - git
+        - ticktock:SOFT # Remove docker dependency for github code check run due to docker install failure.
+    setenv:
+      JUSTME: fancy a spot of tea?

@@ -1,0 +1,31 @@
+---
+services:
+  aws.greengrass.Nucleus:
+    componentType: NUCLEUS
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  HardDependency:
+    lifecycle:
+      posix:
+        run:
+          script: while true; do sleep 1000; done
+      windows:
+        run:
+          script: ping -n 1000 127.0.0.1 > NUL
+  CustomerApp:
+    dependencies:
+      - HardDependency:HARD
+    lifecycle:
+      posix:
+        run:
+          script: while true; do sleep 1000; done
+      windows:
+        run:
+          script: ping -n 1000 127.0.0.1 > NUL
+  main:
+    dependencies:
+      - CustomerApp:HARD
+      - aws.greengrass.Nucleus

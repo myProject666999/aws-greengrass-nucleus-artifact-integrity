@@ -1,0 +1,25 @@
+---
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  ServiceA:
+    lifecycle:
+      startup:
+        script:
+          posix:
+            exit 1;
+          windows: echo STARTUP_ERROR && exit /b 1
+      recover:
+        script:
+          posix:
+            echo Not going to fix anything;
+          windows:
+            echo Not going to fix anything
+
+  main:
+    dependencies:
+      - ServiceA

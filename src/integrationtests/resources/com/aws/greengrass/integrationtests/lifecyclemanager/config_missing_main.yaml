@@ -1,0 +1,13 @@
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  simpleRun:
+    lifecycle:
+      run: |-
+        sleep 2
+        echo "RUN_SUCCESS"
+        exit 0

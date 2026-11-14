@@ -1,0 +1,30 @@
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  installerror:
+    lifecycle:
+      posix:
+        install: |-
+          sleep 2
+          echo "INSTALL_SUCCESS"
+          exit 0
+      windows:
+        install: ping -n 2 127.0.0.1 > NUL && echo INSTALL_SUCCESS && exit /b 0
+  main:
+    lifecycle:
+      install:
+        all: echo All installed
+      posix:
+        run: |-
+          echo main of config_install_succeed_partial is running
+          while true; do
+          date; sleep 5;
+          done
+      windows:
+        run: echo main of config_install_succeed_partial is running && ping -n 1000 127.0.0.1 > NUL
+    dependencies:
+      - installerror

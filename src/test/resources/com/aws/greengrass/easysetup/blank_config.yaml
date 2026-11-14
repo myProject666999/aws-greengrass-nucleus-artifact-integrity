@@ -1,0 +1,5 @@
+services:
+  main:
+    Lifecycle:
+      run: >-
+        echo "Main Running"

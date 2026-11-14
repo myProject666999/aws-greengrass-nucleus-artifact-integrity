@@ -1,0 +1,19 @@
+---
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  main:
+    lifecycle:
+      install:
+        all: echo All installed
+    dependencies:
+      - aws.greengrass.Nucleus
+
+  aws.greengrass.TestProvisioningPlugin:
+    configuration:
+      iotDataEndpoint: test.iot.data.endpoint
+      certificateFilePath: /tmp/certfile.pem

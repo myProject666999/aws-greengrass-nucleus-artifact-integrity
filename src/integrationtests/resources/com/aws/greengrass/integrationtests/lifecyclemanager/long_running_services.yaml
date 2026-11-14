@@ -1,0 +1,42 @@
+---
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  sleeperB:
+    lifecycle:
+      posix:
+        run: |-
+          while true; do
+          date; echo sleeperB_running; sleep 5
+          done
+      windows:
+        run: echo sleeperB_running && ping -n 1000 127.0.0.1 > NUL
+
+  sleeperA:
+    dependencies:
+      - sleeperB
+    lifecycle:
+      posix:
+        run: |-
+          while true; do
+          date; echo sleeperA_running; sleep 5
+          done
+      windows:
+        run: echo sleeperA_running && ping -n 1000 127.0.0.1 > NUL
+
+  main:
+    dependencies:
+      - sleeperA
+      - sleeperB
+    lifecycle:
+      posix:
+        run: |-
+          while true; do
+          sleep 5
+          done
+      windows:
+        run: ping -n 1000 127.0.0.1 > NUL

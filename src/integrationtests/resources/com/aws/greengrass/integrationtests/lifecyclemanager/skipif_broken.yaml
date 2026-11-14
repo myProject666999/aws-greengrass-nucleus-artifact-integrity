@@ -1,0 +1,22 @@
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  test:
+    lifecycle:
+      run:
+        posix:
+          skipif: This is broken
+          script: echo "Running test" && sleep 10
+        windows:
+          skipif: This is broken
+          script: echo "Running test"
+  main:
+    lifecycle:
+      run:
+        script: echo "Running main" && sleep 60
+    dependencies:
+      - test

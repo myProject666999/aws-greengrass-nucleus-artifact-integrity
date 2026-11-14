@@ -1,0 +1,23 @@
+---
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  ServiceA:
+    lifecycle:
+      startup:
+        script:
+          posix:
+            exit 1;
+      recover:
+        timeout: 1
+        script:
+          posix:
+            sleep 120;
+
+  main:
+    dependencies:
+      - ServiceA

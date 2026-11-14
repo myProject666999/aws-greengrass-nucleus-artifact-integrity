@@ -1,0 +1,4 @@
+services:
+  main:
+    lifecycle:
+      run: sleep 100

@@ -1,0 +1,53 @@
+---
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+  plugin:
+    dependencies:
+      - ServiceB
+      - ServiceC
+    version: 1.0.0
+    componentType: PLUGIN
+  ServiceA:
+    dependencies:
+      - ServiceB
+    lifecycle:
+      posix:
+        run:
+          script: while true; do sleep 1000; done
+      windows:
+        run:
+          script: ping -n 1000 127.0.0.1 > NUL
+  ServiceB:
+    lifecycle:
+      posix:
+        run:
+          script: while true; do sleep 1000; done
+      windows:
+        run:
+          script: ping -n 1000 127.0.0.1 > NUL
+  ServiceC:
+    lifecycle:
+      posix:
+        run:
+          script: while true; do sleep 1000; done
+      windows:
+        run:
+          script: ping -n 1000 127.0.0.1 > NUL
+  CustomerApp:
+    dependencies:
+      - ServiceA
+      - plugin
+    lifecycle:
+      posix:
+        run:
+          script: while true; do sleep 1000; done
+      windows:
+        run:
+          script: ping -n 1000 127.0.0.1 > NUL
+  main:
+    dependencies:
+      - CustomerApp:HARD

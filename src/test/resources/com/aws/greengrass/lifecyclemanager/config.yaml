@@ -1,0 +1,91 @@
+---
+services:
+  jdk11:
+    Lifecycle:
+      install:
+        script: |-
+          echo "install jdk11"
+    Dependencies:
+      - homebrew
+  git:
+    Lifecycle:
+      install:
+        skipif: onpath git
+        script: echo "install git"
+    Dependencies:
+      - homebrew
+  homebrew:
+    Lifecycle:
+      install:
+        skipif: onpath brew
+        script: echo "install brew"
+
+  docker:
+    bashtimeout: 300
+    Lifecycle:
+      startup: echo "start docker"
+      install:
+        skipif: onpath docker
+        script: echo "install docker"
+    Dependencies:
+      - homebrew
+  plain:
+    Lifecycle:
+      run:
+        all: "{platform.invoke} {args}"
+
+  #services:
+  localhttp:
+    class: com.aws.iot.httpservice.SimpleHttpServer
+
+  greenlake:
+    Lifecycle:
+      install: echo "install greenlake"
+    throttleBandwidth: 100 kb/s
+  hello-docker:
+    Dependencies:
+      - docker
+    Lifecycle:
+      run: docker run --rm hello-world
+      shutdown: (docker stop hello-world; docker rm hello-world; exit 0)2>&1
+  hello-docker-nginx:
+    Dependencies:
+      - docker
+    Lifecycle:
+      run:  (docker run -d nginx; docker logs -f nginx; exit 0)2>&1
+      shutdown: (docker stop nginx; docker rm nginx; exit 0)2>&1
+  monitoring:
+    Lifecycle:
+      install: echo "install monitoring"
+    Dependencies:
+      - greenlake
+
+  broken:
+    startup: exit -1
+  ticktock:
+    run: echo tick-tock
+    periodic: 2 seconds
+  setenv:
+    ANSWER: 42
+  main:
+    Lifecycle:
+      install: echo All installed
+      run: |-
+        echo $PATH
+        pwd
+        printenv
+        while true; do
+        date; sleep 5; echo RUNNING
+        done
+      download:
+        hw.jar: http://foo/hw.jar
+    Dependencies:
+      - jdk11
+      - git
+      - hello-docker
+      - hello-docker-nginx
+      - ticktock
+    xyzzy: localhttp, broken
+    setenv:
+      JUSTME: fancy a spot of tea?
+    args: -jar {hw.jar}

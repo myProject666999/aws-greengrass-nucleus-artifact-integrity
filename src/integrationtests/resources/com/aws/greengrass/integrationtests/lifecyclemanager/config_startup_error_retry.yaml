@@ -1,0 +1,46 @@
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  startupErrorRetry:
+    lifecycle:
+      posix:
+        startup: |-
+          if [ -f "/tmp/egStartupErrorRetrySucceed" ]; then
+            echo "StartUp_SUCCEED"
+            rm /tmp/egStartupErrorRetrySucceed
+          else
+            echo "StartUp_FAIL"
+            touch /tmp/egStartupErrorRetrySucceed
+            exit 1
+          fi
+      windows:
+        # DO NOT ADD INDENTATION BELOW
+        # Adding "helpful" indentation breaks the way yaml parses the string
+        startup: >-
+          powershell -command if ([System.IO.File]::Exists(\"$env:TEMP\egStartupErrorRetrySucceed\")) {
+          echo StartUp_SUCCEED;
+          Remove-Item $env:TEMP\egStartupErrorRetrySucceed;
+          } else {
+          echo StartUp_FAIL;
+          New-Item $env:TEMP\egStartupErrorRetrySucceed -Force;
+          exit 1;
+          }
+
+  main:
+    lifecycle:
+      install:
+        all: echo All installed
+      posix:
+        run: |-
+          echo main of config_startup_error_retry is running
+          while true; do
+          date; sleep 5;
+          done
+      windows:
+        run: echo main of config_startup_error_retry is running && ping -n 1000 127.0.0.1 > NUL
+    dependencies:
+      - startupErrorRetry

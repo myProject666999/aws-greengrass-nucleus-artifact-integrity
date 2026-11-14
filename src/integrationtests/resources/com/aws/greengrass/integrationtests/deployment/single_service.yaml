@@ -1,0 +1,13 @@
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  main:
+    dependencies:
+      - aws.greengrass.Nucleus
+    lifecycle: {}
+    setenv:
+      HELLO: "Hi"

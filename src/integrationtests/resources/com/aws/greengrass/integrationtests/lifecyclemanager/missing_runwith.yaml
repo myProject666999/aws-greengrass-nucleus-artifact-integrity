@@ -1,0 +1,18 @@
+---
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      awsRegion: us-east-1
+
+  ServiceA:
+    lifecycle:
+      startup:
+        script:
+          windows:
+            ping -n 10 127.0.0.1 > NUL
+          posix:
+            sleep 10
+
+  main:
+    dependencies:
+      - ServiceA

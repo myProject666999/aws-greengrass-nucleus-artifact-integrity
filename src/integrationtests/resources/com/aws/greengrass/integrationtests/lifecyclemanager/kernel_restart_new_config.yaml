@@ -1,0 +1,21 @@
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  main:
+    dependencies:
+      - service_3 # new comparing to kernel_restart_initial_config.yaml
+      - service_2 # updated comparing to kernel_restart_initial_config.yaml
+
+  service_3:
+    lifecycle:
+      run: echo "service_3"
+
+  service_2:
+    setenv:
+      key1: new_value1 # updated comparing to kernel_restart_initial_config.yaml
+    lifecycle:
+      run: echo "service_2"

@@ -1,0 +1,27 @@
+---
+RecipeFormatVersion: '2020-01-25'
+ComponentName: SubscribeAndPublish
+ComponentVersion: '1.0.0'
+ComponentDescription: SubscribeAndPublish
+ComponentPublisher: Amazon
+ComponentConfiguration:
+  DefaultConfiguration:
+    accessControl:
+      aws.greengrass.ipc.pubsub:
+        policyId1:
+          policyDescription: access to pubsub topics
+          operations:
+            - '*'
+          resources:
+            - '*'
+
+Manifests:
+  - Platform:
+      os: windows
+    Lifecycle:
+      run: ping -n 1 127.0.0.1 > NUL
+  - Platform:
+      os: all
+    Lifecycle:
+      run:
+        sleep 1

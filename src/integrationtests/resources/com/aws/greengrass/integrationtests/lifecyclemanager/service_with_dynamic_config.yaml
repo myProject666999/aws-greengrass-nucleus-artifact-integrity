@@ -1,0 +1,29 @@
+services:
+  aws.greengrass.Nucleus:
+    componentType: NUCLEUS
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  main:
+    dependencies:
+      - service_with_dynamic_config
+      - aws.greengrass.Nucleus
+  service_with_dynamic_config:
+    lifecycle:
+      install:
+        echo "Installing service_with_dynamic_config"
+      run:
+        posix:
+          echo "Running service_with_dynamic_config" && sleep 1000
+        windows:
+          echo Running service_with_dynamic_config && ping -n 1000 127.0.0.1 > NUL
+      shutdown:
+        all:
+          echo shutdown v1.0.0
+    version: 1.0.0
+    setenv:
+      my_env_var: var1
+    configuration:
+      my_custom_key: 'my_custom_initial_value'

@@ -1,0 +1,28 @@
+---
+RecipeFormatVersion: '2020-01-25'
+ComponentName: {{CustomerApp}}
+ComponentDescription: A customer app
+ComponentPublisher: Me
+ComponentVersion: '0.9.1'
+ComponentDependencies:
+  {{Mosquitto}}:
+    VersionRequirement: 1.0.0
+Manifests:
+  - Platform:
+      os: windows
+    Lifecycle:
+      startup: ping -n 2 127.0.0.1 > NUL && echo CustomerApp succeeds on windows && exit /b 0
+  - Platform:
+      os: darwin
+    Lifecycle:
+      startup: |-
+        sleep 2
+        echo "CustomerApp succeeds on MacOS."
+        exit 0
+  - Platform:
+      os: linux
+    Lifecycle:
+      startup: |-
+        sleep 2
+        echo "CustomerApp succeeds."
+        exit 0

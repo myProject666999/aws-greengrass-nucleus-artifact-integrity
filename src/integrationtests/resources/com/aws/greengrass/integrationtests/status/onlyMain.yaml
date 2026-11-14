@@ -1,0 +1,13 @@
+---
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      deploymentPollingFrequencySeconds: 0
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  main:
+    dependencies:
+      - aws.greengrass.Nucleus
+      - FleetStatusService

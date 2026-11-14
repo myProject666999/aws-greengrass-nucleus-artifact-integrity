@@ -1,0 +1,836 @@
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package com.aws.greengrass.deployment;
+
+import com.aws.greengrass.config.WhatHappened;
+import com.aws.greengrass.dependency.InjectionActions;
+import com.aws.greengrass.deployment.exceptions.DeviceConfigurationException;
+import com.aws.greengrass.deployment.model.Deployment;
+import com.aws.greengrass.deployment.model.Deployment.DeploymentType;
+import com.aws.greengrass.deployment.model.DeploymentTaskMetadata;
+import com.aws.greengrass.lifecyclemanager.GreengrassService;
+import com.aws.greengrass.lifecyclemanager.Kernel;
+import com.aws.greengrass.lifecyclemanager.exceptions.ServiceLoadException;
+import com.aws.greengrass.logging.api.Logger;
+import com.aws.greengrass.logging.impl.LogManager;
+import com.aws.greengrass.mqttclient.MqttClient;
+import com.aws.greengrass.mqttclient.StandaloneMqttConnector;
+import com.aws.greengrass.mqttclient.WrapperMqttClientConnection;
+import com.aws.greengrass.security.SecurityService;
+import com.aws.greengrass.status.FleetStatusService;
+import com.aws.greengrass.status.model.Trigger;
+import com.aws.greengrass.util.Coerce;
+import com.aws.greengrass.util.LockFactory;
+import com.aws.greengrass.util.LockScope;
+import com.aws.greengrass.util.SerializerFactory;
+import com.aws.greengrass.util.Utils;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import lombok.AccessLevel;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+import software.amazon.awssdk.crt.mqtt.MqttClientConnection;
+import software.amazon.awssdk.crt.mqtt.MqttClientConnectionEvents;
+import software.amazon.awssdk.crt.mqtt.MqttException;
+import software.amazon.awssdk.crt.mqtt.QualityOfService;
+import software.amazon.awssdk.iot.iotjobs.model.DescribeJobExecutionRequest;
+import software.amazon.awssdk.iot.iotjobs.model.DescribeJobExecutionResponse;
+import software.amazon.awssdk.iot.iotjobs.model.DescribeJobExecutionSubscriptionRequest;
+import software.amazon.awssdk.iot.iotjobs.model.JobExecutionData;
+import software.amazon.awssdk.iot.iotjobs.model.JobExecutionSummary;
+import software.amazon.awssdk.iot.iotjobs.model.JobExecutionsChangedEvent;
+import software.amazon.awssdk.iot.iotjobs.model.JobExecutionsChangedSubscriptionRequest;
+import software.amazon.awssdk.iot.iotjobs.model.JobStatus;
+import software.amazon.awssdk.iot.iotjobs.model.RejectedError;
+import software.amazon.awssdk.iot.iotjobs.model.UpdateJobExecutionRequest;
+import software.amazon.awssdk.iot.iotjobs.model.UpdateJobExecutionSubscriptionRequest;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Lock;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+import javax.inject.Inject;
+
+import static com.aws.greengrass.deployment.DeploymentStatusKeeper.DEPLOYMENT_ID_KEY_NAME;
+import static com.aws.greengrass.deployment.DeploymentStatusKeeper.DEPLOYMENT_STATUS_DETAILS_KEY_NAME;
+import static com.aws.greengrass.deployment.DeploymentStatusKeeper.DEPLOYMENT_STATUS_KEY_NAME;
+import static com.aws.greengrass.deployment.IotJobsClientWrapper.JOB_DESCRIBE_ACCEPTED_TOPIC;
+import static com.aws.greengrass.deployment.IotJobsClientWrapper.JOB_DESCRIBE_REJECTED_TOPIC;
+import static com.aws.greengrass.deployment.IotJobsClientWrapper.JOB_EXECUTIONS_CHANGED_TOPIC;
+import static com.aws.greengrass.deployment.IotJobsClientWrapper.JOB_UPDATE_ACCEPTED_TOPIC;
+import static com.aws.greengrass.deployment.IotJobsClientWrapper.JOB_UPDATE_REJECTED_TOPIC;
+
+@NoArgsConstructor
+public class IotJobsHelper implements InjectionActions {
+
+    public static final String UPDATE_DEPLOYMENT_STATUS_TIMEOUT_ERROR_LOG = "Timed out while updating the job status";
+    public static final String UPDATE_DEPLOYMENT_STATUS_MQTT_ERROR_LOG = "Caught exception while updating job status";
+    public static final String UPDATE_DEPLOYMENT_STATUS_ACCEPTED = "Job status update was accepted";
+    public static final String STATUS_LOG_KEY_NAME = "Status";
+    public static final String DEVICE_OFFLINE_MESSAGE = "Device not configured to talk to AWS Iot cloud. IOT job "
+            + "deployment is offline";
+    public static final String SUBSCRIBING_TO_TOPICS_MESSAGE = "Subscribing to Iot Jobs Topics";
+    protected static final String SUBSCRIPTION_JOB_DESCRIPTION_RETRY_MESSAGE =
+            "No connection available during subscribing to Iot Jobs descriptions topic. Will retry in sometime";
+    protected static final String SUBSCRIPTION_JOB_DESCRIPTION_INTERRUPTED =
+            "Interrupted while subscribing to Iot Jobs descriptions topic";
+    protected static final String SUBSCRIPTION_EVENT_NOTIFICATIONS_RETRY =
+            "No connection available during subscribing to Iot jobs event notifications topic. Will retry in sometime";
+    protected static final String SUBSCRIPTION_EVENT_NOTIFICATIONS_INTERRUPTED =
+            "Interrupted while subscribing to Iot jobs event notifications topic";
+    private static final String JOB_ID_LOG_KEY_NAME = "JobId";
+    private static final String NEXT_JOB_LITERAL = "$next";
+    /**
+     * IoT Jobs status detail values are limited to 1024 characters by the service.
+     */
+    private static final int JOB_STATUS_DETAIL_MAX_LENGTH = 1024;
+    // Sometimes when we are notified that a new job is queued and request the next pending job document immediately,
+    // we get an empty response. This unprocessedJobs is to track the number of new queued jobs that we are notified
+    // with, and keep retrying the request until we get a non-empty response.
+    private static final AtomicInteger unprocessedJobs = new AtomicInteger(0);
+    @Getter(AccessLevel.PACKAGE)
+    private static final LatestQueuedJobs latestQueuedJobs = new LatestQueuedJobs();
+
+    private static final Logger logger = LogManager.getLogger(IotJobsHelper.class);
+    private static final long WAIT_TIME_MS_TO_SUBSCRIBE_AGAIN = Duration.ofMinutes(2).toMillis();
+    private static final Random RANDOM = new Random();
+    private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
+
+    // setter is only used for testing
+    @Setter
+    @Inject
+    private DeviceConfiguration deviceConfiguration;
+
+    @Inject
+    private IotJobsClientFactory iotJobsClientFactory;
+
+    @Inject
+    private WrapperMqttConnectionFactory wrapperMqttConnectionFactory;
+
+    @Inject
+    private ExecutorService executorService;
+
+    @Inject
+    private DeploymentStatusKeeper deploymentStatusKeeper;
+
+    @Inject
+    private FleetStatusService fleetStatusService;
+
+    @Inject
+    private Kernel kernel;
+
+    @Inject
+    private MqttClient mqttClient;
+
+    @Setter
+    @Inject
+    private DeploymentQueue deploymentQueue;
+
+    private MqttClientConnection connection;
+
+    @Setter(AccessLevel.PACKAGE) // For tests
+    private long waitTimeToSubscribeAgain = WAIT_TIME_MS_TO_SUBSCRIBE_AGAIN;
+
+    @Getter // For tests
+    @Setter // For tests
+    private IotJobsClientWrapper iotJobsClientWrapper;
+
+    private final AtomicBoolean isSubscribedToIotJobsTopics = new AtomicBoolean(false);
+    private Future<?> subscriptionFuture;
+    private volatile String thingName;
+
+    private final Consumer<JobExecutionsChangedEvent> eventHandler = event -> {
+        /*
+         * This message is received when either of these things happen
+         * 1. Last job completed (successful/failed)
+         * 2. A new job was queued
+         * 3. A job was cancelled
+         * This message receives the list of Queued and InProgress jobs at the time of this message
+         */
+        Map<JobStatus, List<JobExecutionSummary>> jobs = event.jobs;
+        if (jobs.containsKey(JobStatus.QUEUED)) {
+            // Only increment instead of adding number of jobs from the list, because we will get one notification for
+            // each new job QUEUED.
+            unprocessedJobs.incrementAndGet();
+            logger.atInfo().log("Received new deployment notification. Requesting details");
+            //Do not wait on the future in this async handler,
+            //as it will block the thread which establishes
+            // the MQTT connection. This will result in frozen MQTT connection
+            requestNextPendingJobDocument();
+            return;
+        }
+        if (jobs.isEmpty()) {
+            logger.atInfo().log("Received empty jobs in notification ");
+            unprocessedJobs.set(0);
+            evaluateCancellationAndCancelDeploymentIfNeeded();
+            return;
+        }
+        logger.atInfo().kv("jobs", jobs).log("Received other deployment notification. Not supported yet");
+    };
+    /**
+     * Handler that gets invoked when a job description is received.
+     * Next pending job description is requested when an mqtt message
+     * is published using {@code requestNextPendingJobDocument} in {@link IotJobsHelper}
+     */
+    private final Consumer<DescribeJobExecutionResponse> describeJobExecutionResponseConsumer = response -> {
+        if (response.execution == null) {
+            logger.atInfo().log("No deployment job found");
+            if (unprocessedJobs.get() > 0) {
+                // Keep resending request for job details since we got notification of QUEUED jobs
+                logger.atDebug().log("Retry requesting next pending job document");
+                requestNextPendingJobDocument();
+            }
+            return;
+        }
+        if (unprocessedJobs.get() > 0) {
+            unprocessedJobs.decrementAndGet();
+        }
+        JobExecutionData jobExecutionData = response.execution;
+
+        logger.atInfo().kv(JOB_ID_LOG_KEY_NAME, jobExecutionData.jobId).kv(STATUS_LOG_KEY_NAME, jobExecutionData.status)
+                .kv("queueAt", jobExecutionData.queuedAt).log("Received Iot job description");
+        if (!latestQueuedJobs.addNewJobIfAbsent(jobExecutionData.queuedAt.toInstant(), jobExecutionData.jobId)) {
+            logger.atInfo().kv(JOB_ID_LOG_KEY_NAME, jobExecutionData.jobId)
+                    .log("Duplicate or outdated job notification. Ignoring.");
+            return;
+        }
+
+        String documentString;
+        try {
+            documentString =
+                    SerializerFactory.getFailSafeJsonObjectMapper().writeValueAsString(jobExecutionData.jobDocument);
+        } catch (JsonProcessingException e) {
+            // This should not happen as we are converting a HashMap
+            logger.atError().kv(JOB_ID_LOG_KEY_NAME, jobExecutionData.jobId).setCause(e)
+                    .log("Failed to serialize job document");
+            return;
+        }
+
+        // Reaching this point means there is no IN_PROGRESS job in cloud because if there was, it would
+        // have been deduplicated. The fact that we got the next queued deployment means that the previous
+        // IN_PROGRESS job is either finished with SUCCEEDED/FAILED status or got cancelled
+        // Hence, evaluate if there was a cancellation and if so add a cancellation deployment and
+        // then add this next QUEUED job to the deployment queue
+        evaluateCancellationAndCancelDeploymentIfNeeded();
+
+        // Add the job queued in cloud to the deployment queue so it's picked up on its turn
+        Deployment deployment =
+                new Deployment(documentString, DeploymentType.IOT_JOBS, jobExecutionData.jobId);
+
+        if (deploymentQueue.offer(deployment)) {
+            logger.atInfo().kv(JOB_ID_LOG_KEY_NAME, jobExecutionData.jobId).log("Added the job to the queue");
+        }
+    };
+    @Getter
+    public MqttClientConnectionEvents callbacks = new MqttClientConnectionEvents() {
+        @Override
+        public void onConnectionInterrupted(int errorCode) {
+        }
+
+        @Override
+        public void onConnectionResumed(boolean sessionPresent) {
+            executorService.execute(() -> {
+                requestNextPendingJobDocument();
+                deploymentStatusKeeper.publishPersistedStatusUpdates(DeploymentType.IOT_JOBS);
+            });
+        }
+    };
+
+    /**
+     * Constructor for unit testing.
+     */
+    IotJobsHelper(DeviceConfiguration deviceConfiguration,
+                  IotJobsClientFactory iotJobsClientFactory,
+                  DeploymentQueue deploymentQueue,
+                  DeploymentStatusKeeper deploymentStatusKeeper,
+                  ExecutorService executorService,
+                  Kernel kernel,
+                  WrapperMqttConnectionFactory wrapperMqttConnectionFactory,
+                  MqttClient mqttClient,
+                  FleetStatusService fleetStatusService) {
+        this.deviceConfiguration = deviceConfiguration;
+        this.iotJobsClientFactory = iotJobsClientFactory;
+        this.deploymentQueue = deploymentQueue;
+        this.deploymentStatusKeeper = deploymentStatusKeeper;
+        this.executorService = executorService;
+        this.kernel = kernel;
+        this.wrapperMqttConnectionFactory = wrapperMqttConnectionFactory;
+        this.mqttClient = mqttClient;
+        this.fleetStatusService = fleetStatusService;
+    }
+
+    private static void unwrapExecutionException(ExecutionException e)
+            throws TimeoutException, InterruptedException, ExecutionException {
+        Throwable cause = e.getCause();
+        if (cause instanceof TimeoutException) {
+            throw (TimeoutException) cause;
+        }
+        if (cause instanceof InterruptedException) {
+            throw (InterruptedException) cause;
+        }
+        throw e;
+    }
+
+    @Override
+    public void postInject() {
+        mqttClient.addToCallbackEvents(callbacks);
+        this.connection = wrapperMqttConnectionFactory.getAwsIotMqttConnection(mqttClient);
+        // GG_NEEDS_REVIEW: TODO: switch back to IotJobsClient after IoT device sdk updated for jobs namespace
+        this.iotJobsClientWrapper = iotJobsClientFactory.getIotJobsClientWrapper(connection);
+
+        deviceConfiguration.onAnyChange((what, node) -> {
+            if (node != null && WhatHappened.childChanged.equals(what)
+                    && deviceConfiguration.provisionInfoNodeChanged(node, this.isSubscribedToIotJobsTopics.get())) {
+                try {
+                    connectToIotJobs(deviceConfiguration, true);
+                } catch (DeviceConfigurationException e) {
+                    logger.atWarn().kv("errorMessage", e.getMessage()).log(DEVICE_OFFLINE_MESSAGE);
+                    return;
+                }
+            }
+        });
+
+        try {
+            connectToIotJobs(deviceConfiguration, false);
+        } catch (DeviceConfigurationException e) {
+            logger.atWarn().kv("errorMessage", e.getMessage()).log(DEVICE_OFFLINE_MESSAGE);
+            return;
+        }
+    }
+
+    private void connectToIotJobs(DeviceConfiguration deviceConfiguration, Boolean isConfigurationUpdate)
+            throws DeviceConfigurationException {
+
+        // Not using isDeviceConfiguredToTalkToCloud() in order to provide the detailed error message to user
+        deviceConfiguration.validate();
+        setupCommWithIotJobs(isConfigurationUpdate);
+    }
+
+    private void setupCommWithIotJobs(Boolean isConfigurationUpdate) {
+
+        if (subscriptionFuture != null && !subscriptionFuture.isDone()) {
+            subscriptionFuture.cancel(true);
+        }
+        // In case thing name changes, subscriptions corresponding to previous thing nme should be removed
+        if (isSubscribedToIotJobsTopics.get()) {
+            unsubscribeFromIotJobsTopics();
+        }
+
+        // only one consumer per service name will be registered
+        deploymentStatusKeeper.registerDeploymentStatusConsumer(DeploymentType.IOT_JOBS,
+                this::deploymentStatusChanged, IotJobsHelper.class.getName());
+        logger.dfltKv("ThingName", (Supplier<String>) () ->
+                Coerce.toString(deviceConfiguration.getThingName()));
+        this.thingName = Coerce.toString(deviceConfiguration.getThingName());
+        if (subscriptionFuture == null || subscriptionFuture.isDone()) {
+            subscriptionFuture = executorService.submit(() -> {
+                try {
+                    // Wait for all node updates to come through before we subscribe to the topics
+                    Throwable ex = kernel.getContext().runOnPublishQueueAndWait(() -> {});
+                    if (ex instanceof InterruptedException) {
+                        logger.atDebug().log("Got interrupted while waiting for publish queue to clear, during Iot "
+                                + "Jobs subscriptions");
+                        return;
+                    }
+                    subscribeToJobsTopics();
+                } catch (InterruptedException e) {
+                    logger.atWarn().log("Interrupted while subscribing to Iot Jobs topics");
+                    return;
+                }
+                this.isSubscribedToIotJobsTopics.set(true);
+                deploymentStatusKeeper.publishPersistedStatusUpdates(DeploymentType.IOT_JOBS);
+                if (isConfigurationUpdate) {
+                    this.fleetStatusService.updateFleetStatusUpdateForAllComponents(Trigger.NETWORK_RECONFIGURE);
+                }
+            });
+        }
+    }
+
+    private Boolean deploymentStatusChanged(Map<String, Object> deploymentDetails) {
+        String jobId = (String) deploymentDetails.get(DEPLOYMENT_ID_KEY_NAME);
+        String status = (String) deploymentDetails.get(DEPLOYMENT_STATUS_KEY_NAME);
+
+        // Endpoint-switch deployment: report SUCCEEDED to the source endpoint via standalone MQTT.
+        //
+        // After a successful switch the main MQTT client is on the destination endpoint, so the
+        // IoT Job at the source endpoint can only be updated via a standalone connection.
+        //
+        // FAILED (rollback): the device is still on the source endpoint (sourceEndpoint ==
+        // currentEndpoint), so the block clears keys and falls through — the existing
+        // updateJobStatus() below publishes FAILED via the main MQTT client which is still
+        // connected to the source endpoint.
+        //
+        // IN_PROGRESS: only reaches this block after a nucleus restart (the source endpoint
+        // already received IN_PROGRESS before the restart). Dropped to avoid publishing to the
+        // destination endpoint where the IoT Job doesn't exist.
+        if (handleEndpointSwitchStatus(jobId, status, deploymentDetails)) {
+            return true;
+        }
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> statusDetails =
+                (Map<String, Object>) deploymentDetails.get(DEPLOYMENT_STATUS_DETAILS_KEY_NAME);
+        HashMap<String, String> jobStatusDetails = buildJobStatusDetails(statusDetails);
+        logger.atInfo().kv(JOB_ID_LOG_KEY_NAME, jobId).kv(STATUS_LOG_KEY_NAME, status)
+                .kv("StatusDetails", statusDetails).log("Updating status of persisted deployment");
+        try {
+            updateJobStatus(jobId, JobStatus.valueOf(status), jobStatusDetails);
+            return true;
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof MqttException) {
+                //caused due to connectivity issue
+                logger.atError().setCause(e).kv(STATUS_LOG_KEY_NAME, status)
+                        .log(UPDATE_DEPLOYMENT_STATUS_MQTT_ERROR_LOG);
+                return false;
+            }
+            // This happens when job status update gets rejected from the Iot Cloud
+            // Want to remove this job from the list and continue updating others
+            logger.atError().kv(STATUS_LOG_KEY_NAME, status).kv(JOB_ID_LOG_KEY_NAME, jobId).setCause(e)
+                    .log("Job status update rejected");
+            return true;
+        } catch (TimeoutException e) {
+            // assuming this is due to network issue
+            logger.info(UPDATE_DEPLOYMENT_STATUS_TIMEOUT_ERROR_LOG);
+        } catch (InterruptedException e) {
+            logger.atError().kv(JOB_ID_LOG_KEY_NAME, jobId).kv(STATUS_LOG_KEY_NAME, status)
+                    .log("Got interrupted while updating the job status");
+        }
+        return false;
+    }
+
+    /**
+     * Subscribes to the topic which receives confirmation message of Job update for a given JobId.
+     * Updates the status of an Iot Job with given JobId to a given status.
+     *
+     * @param jobId            The jobId to be updated
+     * @param status           The {@link JobStatus} to which to update
+     * @param statusDetailsMap map with job status details
+     * @throws ExecutionException   if update fails
+     * @throws InterruptedException if the thread gets interrupted
+     * @throws TimeoutException     if the operation does not complete within the given time
+     */
+    @SuppressWarnings("PMD.LooseCoupling")
+    public void updateJobStatus(String jobId, JobStatus status, HashMap<String, String> statusDetailsMap)
+            throws ExecutionException, InterruptedException, TimeoutException {
+        UpdateJobExecutionSubscriptionRequest subscriptionRequest = new UpdateJobExecutionSubscriptionRequest();
+        subscriptionRequest.thingName = this.thingName;
+        subscriptionRequest.jobId = jobId;
+        CompletableFuture<Void> gotResponse = new CompletableFuture<>();
+        iotJobsClientWrapper.SubscribeToUpdateJobExecutionAccepted(subscriptionRequest, QualityOfService.AT_LEAST_ONCE,
+                (response) -> {
+                    logger.atInfo().kv(JOB_ID_LOG_KEY_NAME, jobId).kv(STATUS_LOG_KEY_NAME, status)
+                            .log(UPDATE_DEPLOYMENT_STATUS_ACCEPTED);
+                    gotResponse.complete(null);
+                });
+
+        iotJobsClientWrapper.SubscribeToUpdateJobExecutionRejected(subscriptionRequest, QualityOfService.AT_LEAST_ONCE,
+                (response) -> {
+                    logger.atWarn().kv(JOB_ID_LOG_KEY_NAME, jobId).kv(STATUS_LOG_KEY_NAME, status)
+                            .log("Job status updated rejected");
+                    gotResponse.completeExceptionally(new Exception(response.message));
+                });
+
+        // Truncate status detail map values longer than the 1024 characters limit
+        statusDetailsMap.entrySet().forEach(e -> statusDetailsMap.put(e.getKey(),
+                Utils.truncate(e.getValue(), JOB_STATUS_DETAIL_MAX_LENGTH)));
+
+        UpdateJobExecutionRequest updateJobRequest = new UpdateJobExecutionRequest();
+        updateJobRequest.jobId = jobId;
+        updateJobRequest.status = status;
+        updateJobRequest.statusDetails = statusDetailsMap;
+        updateJobRequest.thingName = thingName;
+        try {
+            iotJobsClientWrapper.PublishUpdateJobExecution(updateJobRequest, QualityOfService.AT_LEAST_ONCE).get();
+        } catch (ExecutionException e) {
+            try {
+                unwrapExecutionException(e);
+            } catch (ExecutionException e1) {
+                gotResponse.completeExceptionally(e1.getCause());
+            } catch (TimeoutException | InterruptedException e1) {
+                gotResponse.completeExceptionally(e1);
+            }
+        }
+
+        try {
+            gotResponse.get(mqttClient.getMqttOperationTimeoutMillis(), TimeUnit.MILLISECONDS);
+        } finally {
+            // Either got response, or timed out, so unsubscribe from the job topics now
+            connection.unsubscribe(String.format(JOB_UPDATE_ACCEPTED_TOPIC, thingName, jobId));
+            connection.unsubscribe(String.format(JOB_UPDATE_REJECTED_TOPIC, thingName, jobId));
+        }
+    }
+
+    /**
+     * Request the job description of the next available job for this Iot Thing.
+     * It publishes on the $aws/things/{thingName}/jobs/$next/get topic.
+     */
+    public void requestNextPendingJobDocument() {
+        DescribeJobExecutionRequest describeJobExecutionRequest = new DescribeJobExecutionRequest();
+        describeJobExecutionRequest.thingName = this.thingName;
+        describeJobExecutionRequest.jobId = NEXT_JOB_LITERAL;
+        describeJobExecutionRequest.includeJobDocument = true;
+        //This method is specifically called from an async event notification handler. Async handler cannot block on
+        // this future as that will freeze the MQTT connection.
+        iotJobsClientWrapper.PublishDescribeJobExecution(describeJobExecutionRequest, QualityOfService.AT_LEAST_ONCE);
+        logger.atDebug().log("Requesting the next deployment");
+    }
+
+    /**
+     * Subscribe to the mqtt topics needed for getting Iot Jobs notifications.
+     *
+     * @throws InterruptedException           When operation is interrupted
+     */
+    public void subscribeToJobsTopics() throws InterruptedException {
+
+        logger.atDebug().log(SUBSCRIBING_TO_TOPICS_MESSAGE);
+        subscribeToGetNextJobDescription(describeJobExecutionResponseConsumer, rejectedError -> {
+            logger.error("Job subscription got rejected", rejectedError);
+        });
+        subscribeToEventNotifications(eventHandler);
+        // To receive the description of jobs which were created before the subscription was created (before the device
+        // came online)
+        requestNextPendingJobDocument();
+    }
+
+    /**
+     * Unsubscribe from Iot Jobs topics.
+     */
+    public void unsubscribeFromIotJobsTopics() {
+        unsubscribeFromEventNotifications();
+        unsubscribeFromJobDescription();
+        this.isSubscribedToIotJobsTopics.set(false);
+    }
+
+    /**
+     * Subscribes to the describe job topic to get the job details for the next available pending job
+     * It also publishes a message to get the next pending job.
+     * It returns an empty message if nothing is available
+     *
+     * @param consumerAccept Consumer for when the job is accepted
+     * @param consumerReject Consumer for when the job is rejected
+     * @throws ExecutionException   if subscribing fails
+     * @throws InterruptedException if the thread gets interrupted
+     * @throws TimeoutException     if the operation does not complete within the given time
+     */
+    @SuppressWarnings("PMD.AvoidCatchingThrowable")
+    protected void subscribeToGetNextJobDescription(Consumer<DescribeJobExecutionResponse> consumerAccept,
+                                                    Consumer<RejectedError> consumerReject)
+            throws InterruptedException {
+
+        logger.atDebug().log("Subscribing to deployment job execution update.");
+        DescribeJobExecutionSubscriptionRequest describeJobExecutionSubscriptionRequest =
+                new DescribeJobExecutionSubscriptionRequest();
+        describeJobExecutionSubscriptionRequest.thingName = this.thingName;
+        describeJobExecutionSubscriptionRequest.jobId = NEXT_JOB_LITERAL;
+
+        while (true) {
+            CompletableFuture<Integer> subscribed;
+            try {
+                subscribed = iotJobsClientWrapper
+                        .SubscribeToDescribeJobExecutionAccepted(describeJobExecutionSubscriptionRequest,
+                                QualityOfService.AT_LEAST_ONCE, consumerAccept);
+
+                subscribed.get(mqttClient.getMqttOperationTimeoutMillis(), TimeUnit.MILLISECONDS);
+                subscribed = iotJobsClientWrapper
+                        .SubscribeToDescribeJobExecutionRejected(describeJobExecutionSubscriptionRequest,
+                                QualityOfService.AT_LEAST_ONCE, consumerReject);
+                subscribed.get(mqttClient.getMqttOperationTimeoutMillis(), TimeUnit.MILLISECONDS);
+
+                logger.atDebug().log("Subscribed to deployment job execution update.");
+                break;
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof MqttException || cause instanceof TimeoutException) {
+                    logger.atWarn().setCause(cause).log(SUBSCRIPTION_JOB_DESCRIPTION_RETRY_MESSAGE);
+                }
+                if (cause instanceof InterruptedException) {
+                    logger.atWarn().log(SUBSCRIPTION_JOB_DESCRIPTION_INTERRUPTED);
+                    break;
+                }
+            } catch (InterruptedException e) {
+                logger.atWarn().log(SUBSCRIPTION_JOB_DESCRIPTION_INTERRUPTED);
+                throw e;
+            } catch (Throwable t) {
+                // Catch anything else that happens
+                logger.atWarn().setCause(t).log(SUBSCRIPTION_JOB_DESCRIPTION_RETRY_MESSAGE);
+            }
+
+            try {
+                // Wait for some time and then try to subscribe again
+                if (waitTimeToSubscribeAgain != 0) {
+                    Thread.sleep(waitTimeToSubscribeAgain + RANDOM.nextInt(10_000));
+                }
+            } catch (InterruptedException interruptedException) {
+                logger.atWarn().log(SUBSCRIPTION_JOB_DESCRIPTION_INTERRUPTED);
+                break;
+            }
+        }
+    }
+
+    private void unsubscribeFromJobDescription() {
+        if (connection != null) {
+            String topic = String.format(JOB_DESCRIBE_ACCEPTED_TOPIC,
+                    this.thingName, NEXT_JOB_LITERAL);
+            connection.unsubscribe(topic);
+
+            topic = String.format(JOB_DESCRIBE_REJECTED_TOPIC,
+                    this.thingName, NEXT_JOB_LITERAL);
+            connection.unsubscribe(topic);
+        }
+    }
+
+    /**
+     * Subscribe to $aws/things/{thingName}/jobs/notify topic.
+     *
+     * @param eventHandler The handler which run when an event is received
+     * @throws ExecutionException   When subscribe failed with an exception
+     * @throws InterruptedException When this thread was interrupted
+     * @throws TimeoutException     if the operation does not complete within the given time
+     */
+    protected void subscribeToEventNotifications(Consumer<JobExecutionsChangedEvent> eventHandler)
+            throws InterruptedException {
+
+        logger.atDebug().log("Subscribing to deployment job event notifications.");
+        JobExecutionsChangedSubscriptionRequest request = new JobExecutionsChangedSubscriptionRequest();
+        request.thingName = this.thingName;
+
+        while (true) {
+            CompletableFuture<Integer> subscribed = iotJobsClientWrapper.SubscribeToJobExecutionsChangedEvents(request,
+                    QualityOfService.AT_LEAST_ONCE, eventHandler);
+            try {
+                subscribed.get(mqttClient.getMqttOperationTimeoutMillis(), TimeUnit.MILLISECONDS);
+
+                logger.atDebug().log("Subscribed to deployment job event notifications.");
+                break;
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof MqttException || cause instanceof TimeoutException) {
+                    logger.atWarn().setCause(cause).log(SUBSCRIPTION_EVENT_NOTIFICATIONS_RETRY);
+                }
+                if (cause instanceof InterruptedException) {
+                    logger.atWarn().log(SUBSCRIPTION_EVENT_NOTIFICATIONS_INTERRUPTED);
+                    break;
+                }
+            } catch (InterruptedException e) {
+                logger.atWarn().log(SUBSCRIPTION_EVENT_NOTIFICATIONS_INTERRUPTED);
+                throw e;
+            } catch (TimeoutException e) {
+                logger.atWarn().setCause(e).log(SUBSCRIPTION_EVENT_NOTIFICATIONS_RETRY);
+            }
+
+            try {
+                // Wait for some time and then try to subscribe again
+                if (waitTimeToSubscribeAgain != 0) {
+                    Thread.sleep(waitTimeToSubscribeAgain + RANDOM.nextInt(10_000));
+                }
+            } catch (InterruptedException interruptedException) {
+                logger.atWarn().log(SUBSCRIPTION_EVENT_NOTIFICATIONS_INTERRUPTED);
+                break;
+            }
+        }
+    }
+
+    private void unsubscribeFromEventNotifications() {
+        if (connection != null) {
+            String topic = String.format(JOB_EXECUTIONS_CHANGED_TOPIC,
+                    Coerce.toString(this.thingName));
+            connection.unsubscribe(topic);
+        }
+    }
+
+    private void evaluateCancellationAndCancelDeploymentIfNeeded() {
+        try {
+            GreengrassService deploymentServiceLocateResult =
+                    kernel.locate(DeploymentService.DEPLOYMENT_SERVICE_TOPICS);
+            if (deploymentServiceLocateResult instanceof DeploymentService) {
+                DeploymentService deploymentService = (DeploymentService) deploymentServiceLocateResult;
+                DeploymentTaskMetadata currentDeployment = deploymentService.getCurrentDeploymentTaskMetadata();
+
+                // If the queue is not empty then it means deployment(s) from other sources is/are queued in it,
+                // in that case don't add a cancellation deployment because it can't be added to the front of the queue
+                // we will just have to let current deployment finish
+                Deployment deployment = new Deployment(DeploymentType.IOT_JOBS, UUID.randomUUID().toString(), true);
+                if (deploymentQueue.isEmpty() && currentDeployment != null
+                        && DeploymentType.IOT_JOBS.equals(currentDeployment.getDeploymentType())
+                        && deploymentQueue.offer(deployment)) {
+                    logger.atInfo().log("Added cancellation deployment to the queue");
+                }
+            }
+        } catch (ServiceLoadException e) {
+            logger.atError().setCause(e).log("Failed to find deployment service");
+        }
+    }
+
+    /**
+     * Handle endpoint-switch status reporting. If this deployment is an endpoint switch,
+     * report terminal status to the source endpoint via standalone MQTT and clear persisted state.
+     *
+     * @return true if this status update was handled (caller should return), false to continue normal path
+     */
+    private boolean handleEndpointSwitchStatus(String jobId, String status,
+                                               Map<String, Object> deploymentDetails) {
+        EndpointSwitchState endpointSwitchState = kernel.getContext().get(EndpointSwitchState.class);
+        if (!endpointSwitchState.isEndpointSwitchDeployment(jobId)) {
+            return false;
+        }
+        if (JobStatus.IN_PROGRESS.toString().equals(status)) {
+            return true;
+        }
+        String sourceEndpoint = endpointSwitchState.getSourceIotDataEndpoint();
+        if (sourceEndpoint == null) {
+            // State was cleared concurrently — fall through to normal path
+            endpointSwitchState.clear();
+            return false;
+        }
+        if (!sourceEndpoint.equals(Coerce.toString(deviceConfiguration.getIotDataEndpoint()))) {
+            publishStatusToSourceEndpoint(sourceEndpoint, jobId, deploymentDetails);
+            endpointSwitchState.clear();
+            return true;
+        }
+        endpointSwitchState.clear();
+        return false;
+    }
+
+    @SuppressWarnings("PMD.AvoidCatchingGenericException")
+    @SuppressFBWarnings("REC_CATCH_EXCEPTION")
+    private void publishStatusToSourceEndpoint(String sourceEndpoint, String jobId,
+                                                  Map<String, Object> deploymentDetails) {
+        String status = (String) deploymentDetails.get(DEPLOYMENT_STATUS_KEY_NAME);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> statusDetails =
+                (Map<String, Object>) deploymentDetails.get(DEPLOYMENT_STATUS_DETAILS_KEY_NAME);
+        HashMap<String, String> jobStatusDetails = buildJobStatusDetails(statusDetails);
+
+        String thing = Coerce.toString(deviceConfiguration.getThingName());
+        String topic = String.format(IotJobsClientWrapper.UPDATE_JOB_TOPIC, thing, jobId);
+        long connectTimeout = deviceConfiguration.getStandaloneMqttTimeout();
+        try (StandaloneMqttConnector connector = StandaloneMqttConnector.forEndpointSwitch(
+                kernel.getContext().get(SecurityService.class), deviceConfiguration, sourceEndpoint)) {
+            connector.connect(connectTimeout);
+            UpdateJobExecutionRequest request = new UpdateJobExecutionRequest();
+            request.status = JobStatus.valueOf(status);
+            request.statusDetails = jobStatusDetails;
+            request.thingName = thing;
+            request.jobId = jobId;
+            byte[] payload = GSON.toJson(request).getBytes(StandardCharsets.UTF_8);
+            connector.publish(topic, payload, QualityOfService.AT_LEAST_ONCE,
+                    EndpointSwitchState.DEFAULT_STANDALONE_MQTT_TIMEOUT_MS);
+            logger.atInfo().kv("jobId", jobId).kv("status", status)
+                    .kv("sourceEndpoint", sourceEndpoint)
+                    .log("Reported terminal job status to source endpoint");
+        } catch (Exception e) {
+            logger.atWarn().kv("jobId", jobId).kv("status", status).kv("sourceEndpoint", sourceEndpoint)
+                    .setCause(e).log("Failed to report terminal job status to source endpoint");
+        }
+    }
+
+    @SuppressWarnings("PMD.LooseCoupling") // UpdateJobExecutionRequest.statusDetails requires HashMap
+    private HashMap<String, String> buildJobStatusDetails(Map<String, Object> statusDetails) {
+        HashMap<String, String> jobStatusDetails = new HashMap<>();
+        if (statusDetails == null) {
+            return jobStatusDetails;
+        }
+        statusDetails.forEach((k, v) -> {
+            if (v instanceof String) {
+                jobStatusDetails.put(k, (String) v);
+            } else {
+                try {
+                    jobStatusDetails.put(k, SerializerFactory.getFailSafeJsonObjectMapper().writeValueAsString(v));
+                } catch (JsonProcessingException e) {
+                    logger.atWarn().setCause(e).log("Failed to serialize status detail");
+                }
+            }
+        });
+        jobStatusDetails.replaceAll((k, v) -> Utils.truncate(v, JOB_STATUS_DETAIL_MAX_LENGTH));
+        return jobStatusDetails;
+    }
+
+    public static class WrapperMqttConnectionFactory {
+        public WrapperMqttClientConnection getAwsIotMqttConnection(MqttClient mqttClient) {
+            return new WrapperMqttClientConnection(mqttClient);
+        }
+    }
+
+    public static class IotJobsClientFactory {
+        public IotJobsClientWrapper getIotJobsClientWrapper(MqttClientConnection connection) {
+            return new IotJobsClientWrapper(connection);
+        }
+    }
+
+    static class LatestQueuedJobs {
+        private final Set<String> jobIds = new HashSet<>();
+        // Used to track deployment jobs which involve kernel restart, when QueueAt information is not available.
+        private final Set<String> lastProcessedJobIds = new HashSet<>();
+        private Instant lastQueueAt = Instant.EPOCH;
+        private final Lock lock = LockFactory.newReentrantLock(this);
+
+        /**
+         * Track IoT jobs with the latest timestamp.
+         *
+         * @param queueAt QueueAt timestamp in IoT Job Execution Data
+         * @param jobId   IoT job ID
+         * @return true if IoT job with the given ID is a new job yet to be processed, false otherwise
+         */
+        public boolean addNewJobIfAbsent(Instant queueAt, String jobId) {
+            try (LockScope ls = LockScope.lock(lock)) {
+                if (lastProcessedJobIds.contains(jobId)) {
+                    // Duplicate job but now queueAt information is available so track the timestamp in this way.
+                    trackLastKnownJobs(queueAt, jobId);
+                    lastProcessedJobIds.remove(jobId);
+                    return false;
+                }
+                return trackLastKnownJobs(queueAt, jobId);
+            }
+        }
+
+        private boolean trackLastKnownJobs(Instant queueAt, String jobId) {
+            try (LockScope ls = LockScope.lock(lock)) {
+                if (queueAt.isAfter(lastQueueAt)) {
+                    lastQueueAt = queueAt;
+                    jobIds.clear();
+                    jobIds.add(jobId);
+                    return true;
+                }
+                if (queueAt.isBefore(lastQueueAt) || jobIds.contains(jobId)) {
+                    return false;
+                }
+                jobIds.add(jobId);
+                return true;
+            }
+        }
+
+        public void addProcessedJob(String jobId) {
+            try (LockScope ls = LockScope.lock(lock)) {
+                if (jobIds.contains(jobId)) {
+                    // One IoT jobs is processed at a time. If the job is already tracked, it's sufficient for de-dupe,
+                    // so no need to save again.
+                    return;
+                }
+                lastProcessedJobIds.add(jobId);
+            }
+        }
+    }
+}

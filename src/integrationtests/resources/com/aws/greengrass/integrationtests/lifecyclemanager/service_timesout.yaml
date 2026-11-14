@@ -1,0 +1,30 @@
+---
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  ServiceA:
+    lifecycle:
+      startup:
+        timeout: 1
+        script:
+          windows:
+            ping -n 120 127.0.0.1 > NUL
+          posix:
+            sleep 120
+  ServiceB:
+    lifecycle:
+      run:
+        timeout: 1
+        script:
+          windows:
+            ping -n 120 127.0.0.1 > NUL
+          posix:
+            sleep 120
+  main:
+    dependencies:
+      - ServiceA
+      - ServiceB

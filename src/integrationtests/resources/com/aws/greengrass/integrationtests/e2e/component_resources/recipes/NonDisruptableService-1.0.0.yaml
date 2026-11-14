@@ -1,0 +1,22 @@
+---
+RecipeFormatVersion: '2020-01-25'
+ComponentName: {{NonDisruptableService}}
+ComponentDescription: A service that can be performing important task so should not be restarted if not safe
+ComponentPublisher: Me
+ComponentVersion: '1.0.0'
+Manifests:
+  - Platform:
+      os: darwin
+    Lifecycle:
+      run: |-
+        while true; do
+        echo "running non disruptable service version 1.0.0"; sleep 5
+        done
+
+  - Platform:
+      os: linux
+    Lifecycle:
+      run: |-
+        while true; do
+        echo "running non disruptable service version 1.0.0"; sleep 5
+        done

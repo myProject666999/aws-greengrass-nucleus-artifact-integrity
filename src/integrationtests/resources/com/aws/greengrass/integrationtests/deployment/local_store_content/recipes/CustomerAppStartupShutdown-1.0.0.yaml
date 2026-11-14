@@ -1,0 +1,29 @@
+---
+RecipeFormatVersion: '2020-01-25'
+ComponentName: CustomerAppStartupShutdown
+ComponentDescription: A customer app
+ComponentPublisher: Me
+ComponentVersion: '1.0.0'
+ComponentDependencies:
+  Mosquitto:
+    VersionRequirement: 1.0.0
+  ClassService:
+    VersionRequirement: 1.0.0
+
+Manifests:
+  - Platform:
+      os: windows
+    Lifecycle:
+      startup: echo starting app with user %USERNAME%
+      shutdown: echo stopping app with user %USERNAME%
+      install:
+        RequiresPrivilege: true
+        script: echo installing app with user %USERNAME%
+  - Platform:
+      os: '*'
+    Lifecycle:
+      startup: echo "starting app with user `id -u -n`"
+      shutdown: echo "stopping app with user `id -u -n`"
+      install:
+        RequiresPrivilege: true
+        script: echo "installing app with user `id -u -n`"

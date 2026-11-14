@@ -1,0 +1,29 @@
+---
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+  ServiceA:
+    lifecycle:
+      posix:
+        run:
+          script: while true; do sleep 1000; done
+      windows:
+        run:
+          script: ping -n 1000 127.0.0.1 > NUL
+  CustomerApp:
+    dependencies:
+      - ServiceA:HARD
+      - MissingConfigService:HARD
+    lifecycle:
+      posix:
+        run:
+          script: while true; do sleep 1000; done
+      windows:
+        run:
+          script: ping -n 1000 127.0.0.1 > NUL
+  main:
+    dependencies:
+      - CustomerApp:HARD

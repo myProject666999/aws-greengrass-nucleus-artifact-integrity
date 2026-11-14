@@ -1,0 +1,43 @@
+{
+  "deploymentId": "3b86691d-4f81-408a-852e-edc14cd351a7",
+  "requiredCapabilities": ["LARGE_CONFIGURATION", "ANOTHER_CAPABILITY", "LINUX_RESOURCE_LIMITS"],
+  "configurationValidationPolicy": {
+    "timeout": 120.0
+  },
+  "components": {
+    "CustomerApp": {
+      "version": "1.0.0",
+      "runWith": {
+        "posixUser": "foo",
+        "windowsUser": "bar",
+        "systemResourceLimits": {
+          "memory": 1024000,
+          "cpus": 1.5
+        }
+      },
+      "configurationUpdate": {
+        "merge": {
+          "key": "val"
+        },
+        "reset": [
+          "/sampleText",
+          "/path"
+        ]
+      }
+    },
+    "CustomerApp2": {
+      "version": "1.0.0",
+      "runWith": {
+      },
+      "configurationUpdate": {
+      }
+    }
+  },
+  "componentUpdatePolicy": {
+    "timeout": 120.0,
+    "action": "NOTIFY_COMPONENTS"
+  },
+  "creationTimestamp": 1.604067741583E12,
+  "failureHandlingPolicy": "DO_NOTHING",
+  "configurationArn": "arn:aws:greengrass:us-east-1:698947471564:configuration:thinggroup/SampleGroup:2"
+}

@@ -1,0 +1,27 @@
+---
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+
+  main:
+    dependencies:
+      - echo_service
+    lifecycle:
+      run:
+        echo "Running main"
+  echo_service:
+    lifecycle:
+      install:
+        posix: |-
+          echo "install as `id -u -n`"
+          touch ./install-file
+      run:
+        posix:
+          requiresPrivilege: true
+          script: |-
+            echo "run as `id -u -n`"
+            touch ./run-file
+    version: 1.0.0

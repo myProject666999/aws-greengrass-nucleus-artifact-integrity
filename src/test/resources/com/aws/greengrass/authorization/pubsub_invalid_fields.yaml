@@ -1,0 +1,34 @@
+---
+services:
+  main:
+    dependencies:
+      - mqtt
+      - ServiceName
+    lifecycle:
+
+  mqtt:
+    configuration:
+      accessControl:
+        aws.greengrass.ipc.pubsub:
+          policyId2:
+            policyDescription: access to pubsub topics
+            operations:
+              - publish
+              - subscribe
+            resources:
+              - /topic/1/#
+              - /longer/topic/example/
+
+  ServiceName:
+    lifecycle:
+    configuration:
+      accessControl:
+        aws.greengrass.ipc.pubsub:
+          policyId1:
+            policyTypeInvalid: access to pubsub topics
+            operations:
+              - publish
+              - subscribe
+            resources:
+              - /topic/1/#
+              - /longer/topic/example/

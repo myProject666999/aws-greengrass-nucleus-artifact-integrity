@@ -1,0 +1,17 @@
+---
+services:
+  aws.greengrass.Nucleus:
+    configuration:
+      runWithDefault:
+        posixUser: nobody
+        windowsUser: integ-tester
+  bar:
+    lifecycle:
+      run: echo bar-service phase 3
+  main:
+    lifecycle:
+      install:
+        all: echo All installed
+    dependencies:
+      - bar
+      - aws.greengrass.Nucleus

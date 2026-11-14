@@ -1,0 +1,29 @@
+---
+RecipeFormatVersion: '2020-01-25'
+ComponentName: {{Mosquitto}}
+ComponentDescription: Mosquitto MQTT Server
+ComponentPublisher: Eclipse Foundation
+ComponentVersion: '1.0.0'
+ComponentDependencies:
+  {{GreenSignal}}:
+    VersionRequirement: "=1.0.0"
+Manifests:
+  - Platform:
+      os: darwin
+    Lifecycle:
+      startup:
+        script: echo "Hello this is mosquitto getting started"
+      install:
+        script: echo "Hello This is mosquitto being installed"
+      shutdown:
+        script: echo "By mosquitto signing off!"
+
+  - Platform:
+      os: linux
+    Lifecycle:
+      startup:
+        script: echo "Hello this is mosquitto getting started"
+      install:
+        script: echo "Hello This is mosquitto being installed"
+      shutdown:
+        script: echo "By mosquitto signing off!"

@@ -1,0 +1,11 @@
+---
+RecipeFormatVersion: '2020-01-25'
+ComponentName: python-dateutil
+ComponentDescription: Test recipe for Greengrass Components
+ComponentPublisher: Publisher
+ComponentVersion: '2.8.1'
+ComponentDependencies:
+  six:
+    VersionRequirement: '>=1.5.0'
+Manifests:
+  - Lifecycle: {}

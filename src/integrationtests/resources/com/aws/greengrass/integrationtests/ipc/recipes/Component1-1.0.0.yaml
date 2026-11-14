@@ -1,0 +1,22 @@
+RecipeFormatVersion: '2020-01-25'
+ComponentName: Component1
+ComponentDescription: Test Component
+ComponentPublisher: Me
+ComponentVersion: '1.0.0'
+ComponentConfiguration:
+  DefaultConfiguration:
+    Message: 'World'
+Manifests:
+  - Platform:
+      os: windows
+    Lifecycle:
+      run: echo {configuration:/Message} && ping -n 300 127.0.0.1 > NUL
+    Artifacts:
+      - URI: s3://mock-bucket/run.sh
+  - Platform:
+      os: all
+    Lifecycle:
+      run: |-
+        sh {artifacts:path}/run.sh; echo {configuration:/Message}; sleep 100
+    Artifacts:
+      - URI: s3://mock-bucket/run.sh

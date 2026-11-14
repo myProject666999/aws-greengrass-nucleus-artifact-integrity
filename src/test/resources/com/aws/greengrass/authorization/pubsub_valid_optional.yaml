@@ -1,0 +1,29 @@
+---
+services:
+  main:
+    dependencies:
+      - mqtt
+      - ServiceName
+    lifecycle:
+
+  mqtt:
+    lifecycle:
+    configuration:
+      accessControl:
+        aws.greengrass.ipc.pubsub:
+          policyId2:
+            operations:
+              - publish
+              - subscribe
+
+  ServiceName:
+    resources:
+      - http-resource
+    lifecycle:
+    configuration:
+      accessControl:
+        aws.greengrass.ipc.pubsub:
+          policyId1:
+            operations:
+              - publish
+              - subscribe

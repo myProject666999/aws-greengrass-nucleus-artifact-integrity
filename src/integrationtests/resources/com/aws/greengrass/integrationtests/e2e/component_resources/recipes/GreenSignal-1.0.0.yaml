@@ -1,0 +1,19 @@
+---
+RecipeFormatVersion: '2020-01-25'
+ComponentName: {{GreenSignal}}
+ComponentDescription: A service indicating approval to proceed
+ComponentPublisher: Me
+ComponentVersion: '1.0.0'
+ComponentConfiguration:
+  DefaultConfiguration:
+    NumApprovals: 2
+
+Manifests:
+  - Platform:
+      os: windows
+    Lifecycle:
+      run: echo Go ahead with {configuration:/NumApprovals} approvals
+  - Platform:
+      os: all
+    Lifecycle:
+      run: echo "Go ahead with {configuration:/NumApprovals} approvals"

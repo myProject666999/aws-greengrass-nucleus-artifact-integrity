@@ -1,0 +1,25 @@
+---
+RecipeFormatVersion: '2020-01-25'
+ComponentName: {{CustomerApp}}
+ComponentDescription: A customer app
+ComponentPublisher: Me
+ComponentVersion: '0.9.0'
+ComponentDependencies:
+  {{Mosquitto}}:
+    VersionRequirement: 1.0.0
+Manifests:
+  - Platform:
+      os: darwin
+    Lifecycle:
+      startup: |-
+        sleep 2
+        echo "CustomerApp encounters error."
+        exit 1
+
+  - Platform:
+      os: linux
+    Lifecycle:
+      startup: |-
+        sleep 2
+        echo "CustomerApp encounters error."
+        exit 1
