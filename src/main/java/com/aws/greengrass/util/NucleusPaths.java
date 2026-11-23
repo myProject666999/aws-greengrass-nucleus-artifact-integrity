@@ -13,6 +13,7 @@ import java.nio.file.Path;
 
 import static com.aws.greengrass.componentmanager.ComponentStore.ARTIFACTS_DECOMPRESSED_DIRECTORY;
 import static com.aws.greengrass.componentmanager.ComponentStore.ARTIFACT_DIRECTORY;
+import static com.aws.greengrass.componentmanager.ComponentStore.INTEGRITY_RECORD_DIRECTORY;
 import static com.aws.greengrass.componentmanager.ComponentStore.RECIPE_DIRECTORY;
 
 @SuppressWarnings("checkstyle:MissingJavadocMethod")
@@ -121,6 +122,9 @@ public class NucleusPaths {
 
         Utils.createPaths(recipePath());
         Permissions.setRecipeStorePermission(recipePath());
+
+        Utils.createPaths(integrityRecordPath());
+        Permissions.setRecipeStorePermission(integrityRecordPath());
     }
 
     public Path artifactPath() {
@@ -162,6 +166,34 @@ public class NucleusPaths {
         p = p.resolve(componentIdentifier.getVersion().getValue());
         Utils.createPaths(p);
         Permissions.setArtifactStorePermission(p);
+        return p;
+    }
+
+    /**
+     * Root directory that holds extraction provenance/audit records. It is intentionally not under
+     * {@link #unarchivePath()} so audits of extracted members never see their own bookkeeping.
+     *
+     * @return integrity record root
+     */
+    public Path integrityRecordPath() {
+        return componentStorePath.resolve(INTEGRITY_RECORD_DIRECTORY);
+    }
+
+    /**
+     * Per-component directory that holds extraction provenance/audit records.
+     *
+     * @param componentIdentifier component identity
+     * @return record directory, created if missing
+     * @throws IOException if the directory cannot be created
+     */
+    public Path integrityRecordPath(ComponentIdentifier componentIdentifier) throws IOException {
+        Path p = integrityRecordPath().resolve(componentIdentifier.getName());
+        Utils.createPaths(p);
+        Permissions.setRecipeStorePermission(p);
+
+        p = p.resolve(componentIdentifier.getVersion().getValue());
+        Utils.createPaths(p);
+        Permissions.setRecipeStorePermission(p);
         return p;
     }
 

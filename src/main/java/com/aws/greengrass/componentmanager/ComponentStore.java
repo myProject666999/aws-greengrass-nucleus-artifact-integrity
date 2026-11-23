@@ -59,6 +59,7 @@ public class ComponentStore {
     public static final String RECIPE_DIRECTORY = "recipes";
     public static final String ARTIFACT_DIRECTORY = "artifacts";
     public static final String ARTIFACTS_DECOMPRESSED_DIRECTORY = "artifacts-unarchived";
+    public static final String INTEGRITY_RECORD_DIRECTORY = "integrity";
     public static final String RECIPE_FILE_NAME_FORMAT = "%s-%s.yaml";
 
     private static final Logger logger = LogManager.getLogger(ComponentStore.class);
@@ -294,6 +295,16 @@ public class ComponentStore {
         try {
             Path artifactDecompressedDirPath = nucleusPaths.unarchiveArtifactPath(compId);
             FileUtils.deleteDirectory(artifactDecompressedDirPath.toFile());
+        } catch (IOException e) {
+            if (exception == null) {
+                exception = e;
+            } else {
+                exception.addSuppressed(e);
+            }
+        }
+        // delete extraction provenance/audit records so they do not outlive the artifacts they describe
+        try {
+            FileUtils.deleteDirectory(nucleusPaths.integrityRecordPath(compId).toFile());
         } catch (IOException e) {
             if (exception == null) {
                 exception = e;

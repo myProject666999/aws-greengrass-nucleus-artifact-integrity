@@ -18,6 +18,10 @@ import com.aws.greengrass.componentmanager.exceptions.PackageDownloadException;
 import com.aws.greengrass.componentmanager.exceptions.PackageLoadingException;
 import com.aws.greengrass.componentmanager.exceptions.PackagingException;
 import com.aws.greengrass.componentmanager.exceptions.SizeLimitException;
+import com.aws.greengrass.componentmanager.integrity.ArtifactIntegrityManager;
+import com.aws.greengrass.componentmanager.integrity.DigestSpec;
+import com.aws.greengrass.componentmanager.integrity.ExtractionPreparer;
+import com.aws.greengrass.componentmanager.integrity.IntegrityDetail;
 import com.aws.greengrass.componentmanager.models.ComponentArtifact;
 import com.aws.greengrass.componentmanager.models.ComponentIdentifier;
 import com.aws.greengrass.componentmanager.models.ComponentMetadata;
@@ -96,6 +100,7 @@ public class ComponentManager implements InjectionActions {
     private final Kernel kernel;
     private final Unarchiver unarchiver;
     private final NucleusPaths nucleusPaths;
+    private final ArtifactIntegrityManager artifactIntegrityManager;
     // Setter for unit tests
     @Setter(AccessLevel.PACKAGE)
     private RetryUtils.RetryConfig clientExceptionRetryConfig =
@@ -119,12 +124,14 @@ public class ComponentManager implements InjectionActions {
      * @param unarchiver                unarchiver
      * @param deviceConfiguration       deviceConfiguration
      * @param nucleusPaths              path library
+     * @param artifactIntegrityManager  offline artifact integrity boundary
      */
     @Inject
     public ComponentManager(ArtifactDownloaderFactory artifactDownloaderFactory,
                             ComponentServiceHelper componentServiceHelper, ExecutorService executorService,
                             ComponentStore componentStore, Kernel kernel, Unarchiver unarchiver,
-                            DeviceConfiguration deviceConfiguration, NucleusPaths nucleusPaths) {
+                            DeviceConfiguration deviceConfiguration, NucleusPaths nucleusPaths,
+                            ArtifactIntegrityManager artifactIntegrityManager) {
         this.artifactDownloaderFactory = artifactDownloaderFactory;
         this.componentServiceHelper = componentServiceHelper;
         this.executorService = executorService;
@@ -133,6 +140,7 @@ public class ComponentManager implements InjectionActions {
         this.unarchiver = unarchiver;
         this.deviceConfiguration = deviceConfiguration;
         this.nucleusPaths = nucleusPaths;
+        this.artifactIntegrityManager = artifactIntegrityManager;
     }
 
     ComponentMetadata resolveComponentVersion(String componentName, Map<String, Requirement> versionRequirements)
@@ -532,7 +540,7 @@ public class ComponentManager implements InjectionActions {
                     try {
                         Path unarchivePath =
                                 nucleusPaths.unarchiveArtifactPath(componentIdentifier, getFileName(artifactFile));
-                        unarchiver.unarchive(unarchive, artifactFile, unarchivePath);
+                        unarchiveWithProvenance(componentIdentifier, artifact, artifactFile, unarchive, unarchivePath);
                         if (downloader.canSetFilePermissions()) {
                             try {
                                 Permissions.setArtifactPermission(unarchivePath,
@@ -552,6 +560,40 @@ public class ComponentManager implements InjectionActions {
                 }
             }
         }
+    }
+
+    private void unarchiveWithProvenance(ComponentIdentifier componentIdentifier, ComponentArtifact artifact,
+                                         File artifactFile, Unarchive unarchive, Path unarchivePath)
+            throws IOException {
+        // When the artifact has a usable recipe digest, verify the bytes and unpack through an isolated staging
+        // directory so a later audit can trust the result. If the bytes are not verified - a content mismatch or an
+        // unreadable file - do not silently unpack them over a previous result; surface the failure instead.
+        // Legacy artifacts with no digest metadata cannot be bound to a trustworthy record, so they keep the existing
+        // in-place unpack path unchanged.
+        ExtractionPreparer.PrepareResult prepared;
+        try {
+            prepared = artifactIntegrityManager.prepareVerifiedExtraction(componentIdentifier, artifact, unarchive,
+                    (source, destination) -> unarchiver.unarchive(unarchive, source.toFile(), destination));
+        } catch (IOException e) {
+            throw new IOException("Failed to prepare a verified extraction", e);
+        }
+        if (prepared != null && prepared.isUsable()) {
+            return;
+        }
+        if (prepared != null && prepared.getFailureDetail() == IntegrityDetail.SOURCE_UNVERIFIED
+                && hasUsableRecipeDigest(artifact)) {
+            // A digest was declared but the current bytes do not match it. Never overwrite a usable result with
+            // unverified bytes; the caller decides whether to re-download.
+            throw new IOException(String.format(
+                    "Refusing to unpack component %s artifact %s: artifact bytes are not verified",
+                    componentIdentifier, artifact.getArtifactUri().getSchemeSpecificPart()));
+        }
+        // Legacy input with no digest metadata: use the existing unpack path and record no provenance.
+        unarchiver.unarchive(unarchive, artifactFile, unarchivePath);
+    }
+
+    private static boolean hasUsableRecipeDigest(ComponentArtifact artifact) {
+        return DigestSpec.parse(artifact.getAlgorithm(), artifact.getChecksum()).usable();
     }
 
     private long getConfiguredMaxSize() {

@@ -17,6 +17,10 @@ import com.aws.greengrass.componentmanager.exceptions.NoAvailableComponentVersio
 import com.aws.greengrass.componentmanager.exceptions.PackageDownloadException;
 import com.aws.greengrass.componentmanager.exceptions.PackagingException;
 import com.aws.greengrass.componentmanager.exceptions.SizeLimitException;
+import com.aws.greengrass.componentmanager.integrity.ArtifactIntegrityManager;
+import com.aws.greengrass.componentmanager.integrity.ExtractionPreparer;
+import com.aws.greengrass.componentmanager.integrity.IntegrityDetail;
+import com.aws.greengrass.componentmanager.integrity.IntegrityStatus;
 import com.aws.greengrass.componentmanager.models.ComponentArtifact;
 import com.aws.greengrass.componentmanager.models.ComponentIdentifier;
 import com.aws.greengrass.componentmanager.models.ComponentMetadata;
@@ -60,6 +64,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -147,6 +152,8 @@ class ComponentManagerTest {
     private DeviceConfiguration deviceConfiguration;
     @Mock
     private NucleusPaths nucleusPaths;
+    @Mock
+    private ArtifactIntegrityManager artifactIntegrityManager;
 
     @BeforeEach
     void beforeEach() throws Exception {
@@ -168,7 +175,7 @@ class ComponentManagerTest {
         lenient().when(componentStore.getUsableSpace()).thenReturn(100_000_000L);
         componentManager =
                 new ComponentManager(artifactDownloaderFactory, componentManagementServiceHelper, executor, componentStore,
-                                     kernel, mockUnarchiver, deviceConfiguration, nucleusPaths);
+                                     kernel, mockUnarchiver, deviceConfiguration, nucleusPaths, artifactIntegrityManager);
     }
 
     @AfterEach
@@ -215,6 +222,29 @@ class ComponentManagerTest {
         ArgumentCaptor<File> fileCaptor = ArgumentCaptor.forClass(File.class);
         verify(mockUnarchiver).unarchive(any(), fileCaptor.capture(), any());
         assertEquals("binary1", fileCaptor.getValue().getName());
+    }
+
+    @Test
+    void GIVEN_corrupted_artifact_with_declared_digest_WHEN_prepare_unarchive_THEN_refused_without_unpacking(
+            ExtensionContext context) throws Exception {
+        ignoreExceptionUltimateCauseOfType(context, PackageDownloadException.class);
+        ComponentIdentifier pkgId = new ComponentIdentifier("CoolService", new Semver("1.0.0"));
+
+        when(componentStore.resolveArtifactDirectoryPath(pkgId)).thenReturn(tempDir);
+        when(artifactDownloader.download()).thenReturn(new File("binary1"));
+        when(artifactDownloader.getArtifactFile()).thenReturn(new File("binary1"));
+        when(artifactIntegrityManager.prepareVerifiedExtraction(any(), any(), any(), any()))
+                .thenReturn(ExtractionPreparer.PrepareResult.failure(IntegrityStatus.UNVERIFIABLE,
+                        IntegrityDetail.SOURCE_UNVERIFIED, "source not verified"));
+
+        ComponentArtifact artifact = ComponentArtifact.builder().artifactUri(new URI("greengrass:binary1"))
+                .algorithm("SHA-256").checksum(Base64.getEncoder().encodeToString(new byte[32]))
+                .unarchive(Unarchive.ZIP).build();
+
+        assertThrows(PackageDownloadException.class,
+                () -> componentManager.prepareArtifacts(pkgId, Collections.singletonList(artifact)));
+        // The corrupt bytes must never be unpacked in place.
+        verify(mockUnarchiver, never()).unarchive(any(), any(), any());
     }
 
     @Test
